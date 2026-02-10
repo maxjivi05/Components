@@ -1,0 +1,173 @@
+name: Build Box64 & WOWBox64 Nightly
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  build-android-native:
+    name: Build Box64 (Android Native)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git cmake make python3 p7zip-full wget tar
+
+      - name: Setup Android NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+          unzip -q android-ndk-r26b-linux.zip
+          echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26b" >> $GITHUB_ENV
+          # Using API 28 for broader compatibility while supporting required pthread symbols
+          echo "BOX64_COMPILER=$PWD/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" >> $GITHUB_ENV
+
+      - name: Get Version Info
+        id: version
+        run: |
+          MAJOR=$(grep '#define BOX64_MAJOR' src/box64version.h | awk '{print $3}')
+          MINOR=$(grep '#define BOX64_MINOR' src/box64version.h | awk '{print $3}')
+          REVISION=$(grep '#define BOX64_REVISION' src/box64version.h | awk '{print $3}')
+          VERSION="$MAJOR.$MINOR.$REVISION"
+          COMMIT=$(git rev-parse --short HEAD)
+          FULL_VERSION="${VERSION}-${COMMIT}-nightly"
+          echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
+          echo "Version: $FULL_VERSION"
+
+      - name: Configure CMake
+        run: |
+          mkdir build_android
+          cd build_android
+          cmake .. \
+            -DCMAKE_C_COMPILER=${{ env.BOX64_COMPILER }} \
+            -DANDROID=1 \
+            -DARM_DYNAREC=1 \
+            -DBAD_SIGNAL=1 \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: |
+          cd build_android
+          make -j$(nproc)
+          # Strip debug symbols to reduce size
+          ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip box64
+
+      - name: Package Box64 WCP
+        run: |
+          cd build_android
+          
+          # Create profile.json
+          cat <<EOF > profile.json
+          {
+            "type": "Box64",
+            "versionName": "${FULL_VERSION}",
+            "versionCode": 0,
+            "description": "Box64-${FULL_VERSION}. Author: MaxsTechReview",
+            "files": [
+              {
+                "source": "box64",
+                "target": "\${bindir}/box64"
+              }
+            ]
+          }
+          EOF
+
+          # Package
+          tar -cJf "box64-${FULL_VERSION}.wcp" box64 profile.json
+
+      - name: Upload Box64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: box64-android-native
+          path: build_android/box64-${{ env.FULL_VERSION }}.wcp
+
+  build-wowbox64:
+    name: Build WOWBox64 (MinGW)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git cmake make python3 wget tar
+
+      - name: Setup LLVM-MinGW
+        run: |
+          LLVM_MINGW_VERSION=20250430
+          wget -q https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz
+          tar -xf llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz
+          echo "MINGW_PATH=$PWD/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64/bin" >> $GITHUB_ENV
+
+      - name: Patch WOW64 symbols
+        run: |
+          # Fix undefined symbol: __mingw_vsprintf by adding implementations to crt.c
+          # This is required for the MinGW build to link successfully
+          sed -i 's/int __mingw_sprintf(char\* buffer, const char\* format, ...)/int vsprintf(char* buffer, const char* format, va_list args) { return _vsnprintf(buffer, 0x7fffffff, format, args); } \nint sprintf(char* buffer, const char* format, ...) { va_list args; va_start(args, format); int ret = vsprintf(buffer, format, args); va_end(args); return ret; } \nint __mingw_vsprintf(char* buffer, const char* format, va_list args) { return vsprintf(buffer, format, args); } \nint __mingw_sprintf(char* buffer, const char* format, ...)/' wine/common/crt.c
+
+      - name: Get Version Info
+        id: version
+        run: |
+          MAJOR=$(grep '#define BOX64_MAJOR' src/box64version.h | awk '{print $3}')
+          MINOR=$(grep '#define BOX64_MINOR' src/box64version.h | awk '{print $3}')
+          REVISION=$(grep '#define BOX64_REVISION' src/box64version.h | awk '{print $3}')
+          VERSION="$MAJOR.$MINOR.$REVISION"
+          COMMIT=$(git rev-parse --short HEAD)
+          FULL_VERSION="${VERSION}-${COMMIT}-nightly"
+          echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
+
+      - name: Configure CMake
+        run: |
+          export PATH=$PATH:${{ env.MINGW_PATH }}
+          mkdir build_wow
+          cd build_wow
+          cmake .. \
+            -DCMAKE_C_COMPILER=aarch64-w64-mingw32-gcc \
+            -DWOW64=1 \
+            -DARM_DYNAREC=1 \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          export PATH=$PATH:${{ env.MINGW_PATH }}
+          cd build_wow
+          make -j$(nproc)
+
+      - name: Package WOWBox64 WCP
+        run: |
+          cd build_wow/wowbox64-prefix/src/wowbox64-build
+          
+          # Create profile.json matching the reference structure
+          cat <<EOF > profile.json
+          {
+            "type": "WOWBox64",
+            "versionName": "${FULL_VERSION}",
+            "versionCode": 0,
+            "description": "WOWBox64-${FULL_VERSION}. Author: MaxsTechReview",
+            "files": [
+              {
+                "source": "system32/wowbox64.dll",
+                "target": "\${system32}/wowbox64.dll"
+              }
+            ]
+          }
+          EOF
+
+          # Replicate the folder structure expected by the WCP/Winlator
+          mkdir -p system32
+          cp wowbox64.dll system32/
+          
+          # Package as WCP (XZ compressed)
+          tar -cJf "WOWBox64-${FULL_VERSION}.wcp" system32 profile.json
+
+      - name: Upload WOWBox64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wowbox64-mingw
+          path: build_wow/wowbox64-prefix/src/wowbox64-build/WOWBox64-${{ env.FULL_VERSION }}.wcp
