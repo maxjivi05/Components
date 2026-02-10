@@ -17,10 +17,11 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git cmake make python3 p7zip-full wget tar
+          sudo apt-get install -y git cmake make python3 p7zip-full wget tar file
 
       - name: Setup Android NDK
         run: |
+          echo "Downloading Android NDK r26b..."
           wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
           unzip -q android-ndk-r26b-linux.zip
           echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26b" >> $GITHUB_ENV
@@ -48,14 +49,17 @@ jobs:
             -DANDROID=1 \
             -DARM_DYNAREC=1 \
             -DBAD_SIGNAL=1 \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+            -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: |
           cd build_android
           make -j$(nproc)
+          
+      - name: Strip Binary
+        run: |
           # Strip debug symbols to reduce size
-          ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip box64
+          ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip build_android/box64
 
       - name: Package Box64 WCP
         run: |
@@ -100,16 +104,25 @@ jobs:
 
       - name: Setup LLVM-MinGW
         run: |
-          LLVM_MINGW_VERSION=20250430
-          wget -q https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz
-          tar -xf llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64.tar.xz
-          echo "MINGW_PATH=$PWD/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64/bin" >> $GITHUB_ENV
+          # Using verified stable version
+          LLVM_MINGW_VERSION=20240619
+          echo "Downloading LLVM-MinGW ${LLVM_MINGW_VERSION}..."
+          wget -q https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64.tar.xz
+          tar -xf llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64.tar.xz
+          
+          # Verify extraction
+          ls -F llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64/bin/
+          
+          echo "MINGW_PATH=$PWD/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64/bin" >> $GITHUB_ENV
 
       - name: Patch WOW64 symbols
         run: |
           # Fix undefined symbol: __mingw_vsprintf by adding implementations to crt.c
-          # This is required for the MinGW build to link successfully
+          echo "Patching wine/common/crt.c..."
           sed -i 's/int __mingw_sprintf(char\* buffer, const char\* format, ...)/int vsprintf(char* buffer, const char* format, va_list args) { return _vsnprintf(buffer, 0x7fffffff, format, args); } \nint sprintf(char* buffer, const char* format, ...) { va_list args; va_start(args, format); int ret = vsprintf(buffer, format, args); va_end(args); return ret; } \nint __mingw_vsprintf(char* buffer, const char* format, va_list args) { return vsprintf(buffer, format, args); } \nint __mingw_sprintf(char* buffer, const char* format, ...)/' wine/common/crt.c
+          
+          # Verify patch
+          grep -A 5 "int vsprintf" wine/common/crt.c || echo "Patch might have failed to apply."
 
       - name: Get Version Info
         id: version
