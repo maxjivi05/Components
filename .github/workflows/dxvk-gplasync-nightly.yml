@@ -18,7 +18,6 @@ jobs:
         submodules: recursive
 
     - name: Checkout DXVK GPLAsync
-      # Ph42oN's repo is on GitLab. actions/checkout will fail here, so we clone manually.
       run: git clone https://gitlab.com/Ph42oN/dxvk-gplasync.git dxvk-gplasync
 
     - name: Install Dependencies
@@ -29,8 +28,8 @@ jobs:
     - name: Apply GPLAsync Patch
       run: |
         cd dxvk
-        # Dynamically find the patch file since the version number in the filename changes
-        PATCH_FILE=$(find ../dxvk-gplasync/patches -name "dxvk-gplasync-*.patch" | head -n 1)
+        # Explicitly use the master patch for the master branch
+        PATCH_FILE="../dxvk-gplasync/patches/dxvk-gplasync-master.patch"
         echo "Applying patch: $PATCH_FILE"
         git apply "$PATCH_FILE"
 
@@ -38,15 +37,13 @@ jobs:
       run: |
         cd dxvk
         
-        # 1. Force Enable Descriptor Buffers for Turnip
+        # 1. Force Enable Descriptor Buffers
         cat <<'EOF' > opt1.py
         import sys
         path = "src/dxvk/dxvk_device.h"
         with open(path, "r") as f: content = f.read()
         old = "return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"
-        # FIX: Use triple quotes for multi-line strings
-        new = """if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();
-              return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"""
+        new = "if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();\n      return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"
         content = content.replace(old, new, 1)
         with open(path, "w") as f: f.write(content)
         EOF
@@ -58,9 +55,7 @@ jobs:
         path = "src/dxvk/dxvk_pipemanager.cpp"
         with open(path, "r") as f: content = f.read()
         old = "uint32_t workerCount = dxvk::thread::hardware_concurrency();"
-        # FIX: Use triple quotes for multi-line strings
-        new = old + """
-            if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) workerCount = 8;"""
+        new = old + "\n      if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) workerCount = 8;"
         content = content.replace(old, new)
         with open(path, "w") as f: f.write(content)
         EOF
@@ -84,10 +79,7 @@ jobs:
         path = "src/dxvk/dxvk_device.cpp"
         with open(path, "r") as f: content = f.read()
         old = "m_shaderCache = DxvkShaderCache::getInstance();"
-        # FIX: Use triple quotes for multi-line strings
-        new = old + """
-            if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP) && !m_options.maxMemoryBudget)
-              m_options.maxMemoryBudget = 8192ull << 20u;"""
+        new = old + "\n\n    if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP) && !m_options.maxMemoryBudget)\n      m_options.maxMemoryBudget = 8192ull << 20u;"
         content = content.replace(old, new)
         with open(path, "w") as f: f.write(content)
         EOF
@@ -111,7 +103,8 @@ jobs:
         cp dxvk-built/dxvk-master/x32/*.dll packaging/syswow64/
         
         # Determine Version
-        DXVK_VER=$(grep "project('dxvk'" dxvk/meson.build | cut -d"'" -f6)
+        DXVK_VER=$(grep -oP "version : '\K[^']+" dxvk/meson.build)
+        if [ -z "$DXVK_VER" ]; then DXVK_VER="nightly"; fi
         
         # Create profile.json
         cat <<'EOF' > packaging/profile.json
