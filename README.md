@@ -3,15 +3,11 @@ Welcome to my Components repository. This project serves as a centralized, organ
 📦 Included Components
 This repository hosts a growing collection of essential emulation tools, including but not limited to:
 
-Box64 & WOWBox64
-
-DXVK & VKD3D
-
-FEXCore
-
-Proton & Wine
-
-Custom GPU Drivers
+* Box64 & WOWBox64
+* DXVK & VKD3D
+* FEXCore
+* Proton & Wine
+* Custom GPU Drivers
 
 🧪 Testing & Hardware Focus
 This repository contains both stable releases and experimental (alpha/beta) builds currently undergoing active testing.
