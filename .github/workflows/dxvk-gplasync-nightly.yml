@@ -18,10 +18,8 @@ jobs:
         submodules: recursive
 
     - name: Checkout DXVK GPLAsync
-      uses: actions/checkout@v4
-      with:
-        repository: Ph42oN/dxvk-gplasync
-        path: dxvk-gplasync
+      # Ph42oN/dxvk-gplasync is primarily hosted on GitLab, so actions/checkout (which defaults to GitHub) will fail.
+      run: git clone https://gitlab.com/Ph42oN/dxvk-gplasync.git dxvk-gplasync
 
     - name: Install Dependencies
       run: |
@@ -31,8 +29,8 @@ jobs:
     - name: Apply GPLAsync Patch
       run: |
         cd dxvk
-        # Dynamically find the patch file as the version number in the filename changes
-        PATCH_FILE=$(find ../dxvk-gplasync/patches -name "dxvk-gplasync-*.patch" | head -n 1)
+        # Dynamically find the patch file as the version number in the filename changes often
+        PATCH_FILE=$(find ../dxvk-gplasync/patches -name "dxvk-gplasync-master.patch" -o -name "dxvk-gplasync-*.patch" | head -n 1)
         echo "Applying patch: $PATCH_FILE"
         git apply "$PATCH_FILE"
 
@@ -46,7 +44,7 @@ jobs:
         path = "src/dxvk/dxvk_device.h"
         with open(path, "r") as f: content = f.read()
         old = "return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"
-        # Use triple quotes for multi-line string replacement
+        # FIXED: Use triple quotes for multi-line strings to prevent syntax errors
         new = """if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();
               return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"""
         content = content.replace(old, new, 1)
@@ -60,8 +58,9 @@ jobs:
         path = "src/dxvk/dxvk_pipemanager.cpp"
         with open(path, "r") as f: content = f.read()
         old = "uint32_t workerCount = dxvk::thread::hardware_concurrency();"
-        # Add check for Turnip driver to force 8 workers
-        new = old + "\n    if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) workerCount = 8;"
+        # FIXED: Use triple quotes and explicit indentation
+        new = old + """
+            if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) workerCount = 8;"""
         content = content.replace(old, new)
         with open(path, "w") as f: f.write(content)
         EOF
