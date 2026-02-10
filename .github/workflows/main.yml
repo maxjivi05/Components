@@ -28,9 +28,15 @@ jobs:
           # Using API 28 for broader compatibility while supporting required pthread symbols
           echo "BOX64_COMPILER=$PWD/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" >> $GITHUB_ENV
 
+      - name: Clone Box64
+        run: |
+          git clone https://github.com/ptitSeb/box64 source
+          echo "BOX64_SRC=$PWD/source" >> $GITHUB_ENV
+
       - name: Get Version Info
         id: version
         run: |
+          cd ${{ env.BOX64_SRC }}
           MAJOR=$(grep '#define BOX64_MAJOR' src/box64version.h | awk '{print $3}')
           MINOR=$(grep '#define BOX64_MINOR' src/box64version.h | awk '{print $3}')
           REVISION=$(grep '#define BOX64_REVISION' src/box64version.h | awk '{print $3}')
@@ -44,7 +50,7 @@ jobs:
         run: |
           mkdir build_android
           cd build_android
-          cmake .. \
+          cmake ${{ env.BOX64_SRC }} \
             -DCMAKE_C_COMPILER=${{ env.BOX64_COMPILER }} \
             -DANDROID=1 \
             -DARM_DYNAREC=1 \
@@ -109,24 +115,24 @@ jobs:
           echo "Downloading LLVM-MinGW ${LLVM_MINGW_VERSION}..."
           wget -q https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64.tar.xz
           tar -xf llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64.tar.xz
-          
-          # Verify extraction
-          ls -F llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64/bin/
-          
           echo "MINGW_PATH=$PWD/llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-20.04-x86_64/bin" >> $GITHUB_ENV
+
+      - name: Clone Box64
+        run: |
+          git clone https://github.com/ptitSeb/box64 source
+          echo "BOX64_SRC=$PWD/source" >> $GITHUB_ENV
 
       - name: Patch WOW64 symbols
         run: |
+          cd ${{ env.BOX64_SRC }}
           # Fix undefined symbol: __mingw_vsprintf by adding implementations to crt.c
           echo "Patching wine/common/crt.c..."
           sed -i 's/int __mingw_sprintf(char\* buffer, const char\* format, ...)/int vsprintf(char* buffer, const char* format, va_list args) { return _vsnprintf(buffer, 0x7fffffff, format, args); } \nint sprintf(char* buffer, const char* format, ...) { va_list args; va_start(args, format); int ret = vsprintf(buffer, format, args); va_end(args); return ret; } \nint __mingw_vsprintf(char* buffer, const char* format, va_list args) { return vsprintf(buffer, format, args); } \nint __mingw_sprintf(char* buffer, const char* format, ...)/' wine/common/crt.c
-          
-          # Verify patch
-          grep -A 5 "int vsprintf" wine/common/crt.c || echo "Patch might have failed to apply."
 
       - name: Get Version Info
         id: version
         run: |
+          cd ${{ env.BOX64_SRC }}
           MAJOR=$(grep '#define BOX64_MAJOR' src/box64version.h | awk '{print $3}')
           MINOR=$(grep '#define BOX64_MINOR' src/box64version.h | awk '{print $3}')
           REVISION=$(grep '#define BOX64_REVISION' src/box64version.h | awk '{print $3}')
@@ -140,7 +146,7 @@ jobs:
           export PATH=$PATH:${{ env.MINGW_PATH }}
           mkdir build_wow
           cd build_wow
-          cmake .. \
+          cmake ${{ env.BOX64_SRC }} \
             -DCMAKE_C_COMPILER=aarch64-w64-mingw32-gcc \
             -DWOW64=1 \
             -DARM_DYNAREC=1 \
