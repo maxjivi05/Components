@@ -18,7 +18,7 @@ jobs:
         submodules: recursive
 
     - name: Checkout DXVK GPLAsync
-      # Ph42oN/dxvk-gplasync is primarily hosted on GitLab, so actions/checkout (which defaults to GitHub) will fail.
+      # Ph42oN's repo is on GitLab. actions/checkout will fail, so we clone manually.
       run: git clone https://gitlab.com/Ph42oN/dxvk-gplasync.git dxvk-gplasync
 
     - name: Install Dependencies
@@ -29,8 +29,8 @@ jobs:
     - name: Apply GPLAsync Patch
       run: |
         cd dxvk
-        # Dynamically find the patch file as the version number in the filename changes often
-        PATCH_FILE=$(find ../dxvk-gplasync/patches -name "dxvk-gplasync-master.patch" -o -name "dxvk-gplasync-*.patch" | head -n 1)
+        # Automatically find the patch file since the version number in the filename changes
+        PATCH_FILE=$(find ../dxvk-gplasync/patches -name "dxvk-gplasync-*.patch" | head -n 1)
         echo "Applying patch: $PATCH_FILE"
         git apply "$PATCH_FILE"
 
@@ -44,7 +44,7 @@ jobs:
         path = "src/dxvk/dxvk_device.h"
         with open(path, "r") as f: content = f.read()
         old = "return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"
-        # FIXED: Use triple quotes for multi-line strings to prevent syntax errors
+        # FIX: Use triple quotes for multi-line strings
         new = """if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();
               return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"""
         content = content.replace(old, new, 1)
@@ -52,13 +52,13 @@ jobs:
         EOF
         python3 opt1.py
 
-        # 2. Oryon-Aware Thread Tuning (8 Workers)
+        # 2. Oryon-Aware Thread Tuning
         cat <<'EOF' > opt2.py
         import sys
         path = "src/dxvk/dxvk_pipemanager.cpp"
         with open(path, "r") as f: content = f.read()
         old = "uint32_t workerCount = dxvk::thread::hardware_concurrency();"
-        # FIXED: Use triple quotes and explicit indentation
+        # FIX: Use triple quotes for multi-line strings
         new = old + """
             if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) workerCount = 8;"""
         content = content.replace(old, new)
@@ -66,7 +66,7 @@ jobs:
         EOF
         python3 opt2.py
 
-        # 3. Disable Pipeline Lifetime Tracking for Turnip/RADV
+        # 3. Disable Pipeline Lifetime Tracking
         cat <<'EOF' > opt3.py
         import sys
         path = "src/dxvk/dxvk_device.cpp"
@@ -84,6 +84,7 @@ jobs:
         path = "src/dxvk/dxvk_device.cpp"
         with open(path, "r") as f: content = f.read()
         old = "m_shaderCache = DxvkShaderCache::getInstance();"
+        # FIX: Use triple quotes for multi-line strings
         new = old + """
             if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP) && !m_options.maxMemoryBudget)
               m_options.maxMemoryBudget = 8192ull << 20u;"""
@@ -135,7 +136,7 @@ jobs:
         
         sed -i "s/VERSION_PLACEHOLDER/${DXVK_VER}/g" packaging/profile.json
         
-        # Create WCP package (Winlator Container Package)
+        # Compress
         tar -cJf dxvk-${DXVK_VER}-gplasync-adreno840.wcp -C packaging .
 
     - name: Upload Artifacts
