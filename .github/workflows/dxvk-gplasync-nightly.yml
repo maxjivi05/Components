@@ -115,9 +115,12 @@ jobs:
         cp dxvk-built/dxvk-master/x64/*.dll packaging/system32/
         cp dxvk-built/dxvk-master/x32/*.dll packaging/syswow64/
         
-        # Determine Version
-        DXVK_VER=$(grep -oP "\bversion : '\K[^']+" dxvk/meson.build | head -n 1)
+        # Determine Version and Hash from within dxvk directory
+        cd dxvk
+        DXVK_VER=$(grep -oP "\bversion : '\K[^']+" meson.build | head -n 1)
         if [ -z "$DXVK_VER" ]; then DXVK_VER="nightly"; fi
+        DXVK_HASH=$(git rev-parse --short HEAD)
+        cd ..
         
         # Create profile.json and perform substitution using Python
         cat <<'EOF' > package_info.py
@@ -153,13 +156,7 @@ jobs:
         EOF
         
         export DXVK_VER
-        # DXVK_HASH is already in environment from GITHUB_ENV in previous step for the shell, 
-        # but for sub-processes in the same run block it might need export if it was just set.
-        # However, GITHUB_ENV takes effect in SUBSEQUENT steps.
-        # Let's just redefine it here to be safe since we are in a new 'run' block.
-        DXVK_HASH=$(git rev-parse --short HEAD)
         export DXVK_HASH
-        
         python3 package_info.py
         
         # Create WCP package (Winlator Container Package)
@@ -170,6 +167,6 @@ jobs:
       with:
         name: dxvk-adreno840-build
         path: |
-          *.wcp
+          dxvk-*.wcp
           changelog.txt
           modified-optimizations.txt
