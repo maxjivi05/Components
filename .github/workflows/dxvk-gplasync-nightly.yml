@@ -33,76 +33,87 @@ jobs:
         cd dxvk
         git apply ../dxvk-gplasync/patches/dxvk-gplasync-master.patch
 
-    - name: Apply Adreno 840 Optimizations (Variant 1 & 2)
+    - name: Apply Adreno 840 Optimizations
       run: |
         cd dxvk
         
-        # 1. Force Enable Descriptor Buffers (Variant 1)
-        # Modify dxvk_device.h to force enable descriptor buffer for Turnip
-        sed -i '/bool canUseDescriptorBuffer() const {/a \      if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP))
-        return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();' src/dxvk/dxvk_device.h
+        # 1. Force Enable Descriptor Buffers
+        # Use python for safer multiline replacement
+        python3 -c '
+        import sys
+        path = "src/dxvk/dxvk_device.h"
+        with open(path, "r") as f: content = f.read()
+        old = "return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"
+        new = "if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();
+      return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"
+        # We target the one inside canUseDescriptorBuffer. The previous read showed it is unique enough.
+        content = content.replace(old, new, 1)
+        with open(path, "w") as f: f.write(content)
+        '
 
-        # 2. Oryon-Aware Thread Tuning (Variant 1)
-        # Modify dxvk_pipemanager.cpp to force 8 threads for Turnip
-        sed -i '/uint32_t workerCount = dxvk::thread::hardware_concurrency();/a \      if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_TURNIP))
-        workerCount = 8;' src/dxvk/dxvk_pipemanager.cpp
+        # 2. Oryon-Aware Thread Tuning
+        python3 -c '
+        import sys
+        path = "src/dxvk/dxvk_pipemanager.cpp"
+        with open(path, "r") as f: content = f.read()
+        old = "uint32_t workerCount = dxvk::thread::hardware_concurrency();"
+        new = old + "
+      if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) workerCount = 8;"
+        content = content.replace(old, new)
+        with open(path, "w") as f: f.write(content)
+        '
 
-        # 3. Disable Pipeline Lifetime Tracking (Variant 2)
-        # Modify dxvk_device.cpp to add Turnip to exclusion list
-        sed -i '/if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV_KHR))/s/)/)
-         || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)/' src/dxvk/dxvk_device.cpp
+        # 3. Disable Pipeline Lifetime Tracking
+        python3 -c '
+        import sys
+        path = "src/dxvk/dxvk_device.cpp"
+        with open(path, "r") as f: content = f.read()
+        old = "if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV_KHR))"
+        new = "if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV_KHR) || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP))"
+        content = content.replace(old, new)
+        with open(path, "w") as f: f.write(content)
+        '
 
-        # 4. UMA-Specific Memory Budget Expansion (Variant 2)
-        # Modify dxvk_device.cpp constructor to set default 8GB budget for Turnip
-        sed -i '/m_shaderCache = DxvkShaderCache::getInstance();/a \    if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP) && !m_options.maxMemoryBudget)
-      m_options.maxMemoryBudget = 8192ull << 20u;' src/dxvk/dxvk_device.cpp
+        # 4. UMA-Specific Memory Budget Expansion
+        python3 -c '
+        import sys
+        path = "src/dxvk/dxvk_device.cpp"
+        with open(path, "r") as f: content = f.read()
+        old = "m_shaderCache = DxvkShaderCache::getInstance();"
+        new = old + "
+
+    if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP) && !m_options.maxMemoryBudget)
+      m_options.maxMemoryBudget = 8192ull << 20u;"
+        content = content.replace(old, new)
+        with open(path, "w") as f: f.write(content)
+        '
 
     - name: Build DXVK
       run: |
         cd dxvk
         ./package-release.sh master ../dxvk-built --no-package
 
-    - name: Generate Changelog & Optimization Log
+    - name: Generate Logs
       run: |
         cd dxvk
         git log --since="24 hours ago" > ../changelog.txt
-        
-        cat <<EOF > ../modified-optimizations.txt
-        DXVK Performance Optimizations for Adreno 840 (Snapdragon 8 Elite)
-        Generated: $(date)
+        echo "Adreno 840 Optimizations applied: Descriptor Buffers, 8 Worker Threads, No Pipeline Tracking, 8GB Budget." > ../modified-optimizations.txt
 
-        ACTIVE OPTIMIZATIONS:
-
-        1. Force Enable Descriptor Buffers (VK_EXT_descriptor_buffer)
-           - Modified: src/dxvk/dxvk_device.h
-           - Purpose: Lowers CPU overhead for resource binding. Mobile CPUs benefit significantly from bypassing standard descriptor set allocation.
-
-        2. Disable Pipeline Lifetime Tracking
-           - Modified: src/dxvk/dxvk_device.cpp
-           - Purpose: Reduces CPU cycles spent tracking GPL objects. Turnip handles its own memory/refcounting reliably enough to skip this DXVK-side management.
-
-        3. Oryon-Aware Thread Tuning (8 Threads)
-           - Modified: src/dxvk/dxvk_pipemanager.cpp
-           - Purpose: Forces the use of 8 compiler threads. Optimized for the Snapdragon 8 Elite's Oryon core layout (2+6) to minimize stutter during async compilation.
-
-        4. UMA-Specific Memory Budget Expansion (8GB)
-           - Modified: src/dxvk/dxvk_device.cpp
-           - Purpose: Increases the default "VRAM" budget to 8GB for Turnip. Prevents DXVK from aggressively freeing textures/buffers on high-RAM Android devices.
-        EOF
-
-    - name: Prepare Package
+    - name: Prepare and Package
       run: |
         mkdir -p packaging/system32 packaging/syswow64
         cp dxvk-built/dxvk-master/x64/*.dll packaging/system32/
         cp dxvk-built/dxvk-master/x32/*.dll packaging/syswow64/
         
-        # Create profile.json with Author field
+        # Determine Version
+        DXVK_VER=$(grep "project('''dxvk'" dxvk/meson.build | cut -d"'''" -f6)
+        
         cat <<EOF > packaging/profile.json
         {
           "type": "DXVK",
-          "versionName": "2.7.1-gplasync-adreno840",
+          "versionName": "${DXVK_VER}-gplasync-adreno840",
           "versionCode": 2,
-          "description": "dxvk 2.7.1-gplasync with Adreno 840 (SD8Elite) optimizations",
+          "description": "dxvk ${DXVK_VER}-gplasync with Adreno 840 optimizations",
           "author": "MaxsTechReview",
           "files": [
             { "source": "system32/d3d9.dll", "target": "\${system32}/d3d9.dll" },
@@ -116,16 +127,14 @@ jobs:
           ]
         }
         EOF
-
-    - name: Create WCP Package
-      run: |
-        tar -cJf dxvk-2.7.1-gplasync-adreno840.wcp -C packaging .
+        
+        tar -cJf dxvk-${DXVK_VER}-gplasync-adreno840.wcp -C packaging .
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: dxvk-adreno840-build
         path: |
-          dxvk-2.7.1-gplasync-adreno840.wcp
+          *.wcp
           changelog.txt
           modified-optimizations.txt
