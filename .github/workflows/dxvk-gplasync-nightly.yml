@@ -18,7 +18,7 @@ jobs:
         submodules: recursive
 
     - name: Checkout DXVK GPLAsync
-      # Ph42oN's repo is on GitLab. actions/checkout will fail, so we clone manually.
+      # Ph42oN's repo is on GitLab. actions/checkout will fail here, so we clone manually.
       run: git clone https://gitlab.com/Ph42oN/dxvk-gplasync.git dxvk-gplasync
 
     - name: Install Dependencies
@@ -29,7 +29,7 @@ jobs:
     - name: Apply GPLAsync Patch
       run: |
         cd dxvk
-        # Automatically find the patch file since the version number in the filename changes
+        # Dynamically find the patch file since the version number in the filename changes
         PATCH_FILE=$(find ../dxvk-gplasync/patches -name "dxvk-gplasync-*.patch" | head -n 1)
         echo "Applying patch: $PATCH_FILE"
         git apply "$PATCH_FILE"
@@ -136,7 +136,7 @@ jobs:
         
         sed -i "s/VERSION_PLACEHOLDER/${DXVK_VER}/g" packaging/profile.json
         
-        # Compress
+        # Create WCP package (Winlator Container Package)
         tar -cJf dxvk-${DXVK_VER}-gplasync-adreno840.wcp -C packaging .
 
     - name: Upload Artifacts
