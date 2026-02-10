@@ -94,7 +94,19 @@ jobs:
     - name: Generate Logs
       run: |
         cd dxvk
-        git log --since="24 hours ago" > ../changelog.txt
+        SHORT_HASH=$(git rev-parse --short HEAD)
+        echo "DXVK_HASH=$SHORT_HASH" >> $GITHUB_ENV
+        
+        # Get logs from last 24 hours, fallback to last 5 commits if empty
+        LOG_CONTENT=$(git log --since="24 hours ago" --oneline)
+        if [ -z "$LOG_CONTENT" ]; then
+          echo "No commits in the last 24 hours. Showing last 5 commits:" > ../changelog.txt
+          git log -n 5 --oneline >> ../changelog.txt
+        else
+          echo "Commits in the last 24 hours:" > ../changelog.txt
+          echo "$LOG_CONTENT" >> ../changelog.txt
+        fi
+        
         echo "Adreno 840 Optimizations applied: Descriptor Buffers, 8 Worker Threads, No Pipeline Tracking, 8GB Budget." > ../modified-optimizations.txt
 
     - name: Prepare and Package
@@ -111,14 +123,18 @@ jobs:
         cat <<'EOF' > package_info.py
         import sys
         import os
+        import json
 
         dxvk_ver = os.environ.get("DXVK_VER", "nightly")
+        dxvk_hash = os.environ.get("DXVK_HASH", "unknown")
+        
+        full_version = f"{dxvk_ver}-gplasync-{dxvk_hash}"
         
         profile = {
           "type": "DXVK",
-          "versionName": f"{dxvk_ver}-gplasync-adreno840",
+          "versionName": f"{full_version}-adreno840",
           "versionCode": 2,
-          "description": f"dxvk {dxvk_ver}-gplasync with Adreno 840 optimizations",
+          "description": f"dxvk {full_version} with Adreno 840 optimizations",
           "author": "MaxsTechReview",
           "files": [
             { "source": "system32/d3d9.dll", "target": "${system32}/d3d9.dll" },
@@ -132,16 +148,22 @@ jobs:
           ]
         }
 
-        import json
         with open("packaging/profile.json", "w") as f:
             json.dump(profile, f, indent=2)
         EOF
         
         export DXVK_VER
+        # DXVK_HASH is already in environment from GITHUB_ENV in previous step for the shell, 
+        # but for sub-processes in the same run block it might need export if it was just set.
+        # However, GITHUB_ENV takes effect in SUBSEQUENT steps.
+        # Let's just redefine it here to be safe since we are in a new 'run' block.
+        DXVK_HASH=$(git rev-parse --short HEAD)
+        export DXVK_HASH
+        
         python3 package_info.py
         
         # Create WCP package (Winlator Container Package)
-        tar -cJf dxvk-${DXVK_VER}-gplasync-adreno840.wcp -C packaging .
+        tar -cJf dxvk-${DXVK_VER}-gplasync-${DXVK_HASH}.wcp -C packaging .
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
