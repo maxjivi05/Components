@@ -16,6 +16,7 @@ jobs:
         repository: doitsujin/dxvk
         path: dxvk
         submodules: recursive
+        fetch-depth: 0
 
     - name: Checkout DXVK GPLAsync
       run: git clone https://gitlab.com/Ph42oN/dxvk-gplasync.git dxvk-gplasync
@@ -103,16 +104,21 @@ jobs:
         cp dxvk-built/dxvk-master/x32/*.dll packaging/syswow64/
         
         # Determine Version
-        DXVK_VER=$(grep -oP "version : '\K[^']+" dxvk/meson.build)
+        DXVK_VER=$(grep -oP "\bversion : '\K[^']+" dxvk/meson.build | head -n 1)
         if [ -z "$DXVK_VER" ]; then DXVK_VER="nightly"; fi
         
-        # Create profile.json
-        cat <<'EOF' > packaging/profile.json
-        {
+        # Create profile.json and perform substitution using Python
+        cat <<'EOF' > package_info.py
+        import sys
+        import os
+
+        dxvk_ver = os.environ.get("DXVK_VER", "nightly")
+        
+        profile = {
           "type": "DXVK",
-          "versionName": "VERSION_PLACEHOLDER-gplasync-adreno840",
+          "versionName": f"{dxvk_ver}-gplasync-adreno840",
           "versionCode": 2,
-          "description": "dxvk VERSION_PLACEHOLDER-gplasync with Adreno 840 optimizations",
+          "description": f"dxvk {dxvk_ver}-gplasync with Adreno 840 optimizations",
           "author": "MaxsTechReview",
           "files": [
             { "source": "system32/d3d9.dll", "target": "${system32}/d3d9.dll" },
@@ -125,9 +131,14 @@ jobs:
             { "source": "syswow64/dxgi.dll", "target": "${syswow64}/dxgi.dll" }
           ]
         }
+
+        import json
+        with open("packaging/profile.json", "w") as f:
+            json.dump(profile, f, indent=2)
         EOF
         
-        sed -i "s/VERSION_PLACEHOLDER/${DXVK_VER}/g" packaging/profile.json
+        export DXVK_VER
+        python3 package_info.py
         
         # Create WCP package (Winlator Container Package)
         tar -cJf dxvk-${DXVK_VER}-gplasync-adreno840.wcp -C packaging .
