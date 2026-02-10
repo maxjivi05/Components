@@ -31,39 +31,43 @@ jobs:
     - name: Apply GPLAsync Patch
       run: |
         cd dxvk
-        git apply ../dxvk-gplasync/patches/dxvk-gplasync-master.patch
+        # Dynamically find the patch file as the version number in the filename changes
+        PATCH_FILE=$(find ../dxvk-gplasync/patches -name "dxvk-gplasync-*.patch" | head -n 1)
+        echo "Applying patch: $PATCH_FILE"
+        git apply "$PATCH_FILE"
 
     - name: Apply Adreno 840 Optimizations
       run: |
         cd dxvk
         
-        # 1. Force Enable Descriptor Buffers
+        # 1. Force Enable Descriptor Buffers for Turnip
         cat <<'EOF' > opt1.py
         import sys
         path = "src/dxvk/dxvk_device.h"
         with open(path, "r") as f: content = f.read()
         old = "return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"
-        new = "if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();
-      return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"
+        # Use triple quotes for multi-line string replacement
+        new = """if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();
+              return m_features.extDescriptorBuffer.descriptorBuffer && !canUseDescriptorHeap();"""
         content = content.replace(old, new, 1)
         with open(path, "w") as f: f.write(content)
         EOF
         python3 opt1.py
 
-        # 2. Oryon-Aware Thread Tuning
+        # 2. Oryon-Aware Thread Tuning (8 Workers)
         cat <<'EOF' > opt2.py
         import sys
         path = "src/dxvk/dxvk_pipemanager.cpp"
         with open(path, "r") as f: content = f.read()
         old = "uint32_t workerCount = dxvk::thread::hardware_concurrency();"
-        new = old + "
-      if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) workerCount = 8;"
+        # Add check for Turnip driver to force 8 workers
+        new = old + "\n    if (m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)) workerCount = 8;"
         content = content.replace(old, new)
         with open(path, "w") as f: f.write(content)
         EOF
         python3 opt2.py
 
-        # 3. Disable Pipeline Lifetime Tracking
+        # 3. Disable Pipeline Lifetime Tracking for Turnip/RADV
         cat <<'EOF' > opt3.py
         import sys
         path = "src/dxvk/dxvk_device.cpp"
@@ -81,10 +85,9 @@ jobs:
         path = "src/dxvk/dxvk_device.cpp"
         with open(path, "r") as f: content = f.read()
         old = "m_shaderCache = DxvkShaderCache::getInstance();"
-        new = old + "
-
-    if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP) && !m_options.maxMemoryBudget)
-      m_options.maxMemoryBudget = 8192ull << 20u;"
+        new = old + """
+            if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP) && !m_options.maxMemoryBudget)
+              m_options.maxMemoryBudget = 8192ull << 20u;"""
         content = content.replace(old, new)
         with open(path, "w") as f: f.write(content)
         EOF
@@ -110,8 +113,7 @@ jobs:
         # Determine Version
         DXVK_VER=$(grep "project('dxvk'" dxvk/meson.build | cut -d"'" -f6)
         
-        # Create profile.json with Author field
-        # Use single quotes for EOF to prevent variable expansion
+        # Create profile.json
         cat <<'EOF' > packaging/profile.json
         {
           "type": "DXVK",
@@ -133,6 +135,8 @@ jobs:
         EOF
         
         sed -i "s/VERSION_PLACEHOLDER/${DXVK_VER}/g" packaging/profile.json
+        
+        # Create WCP package (Winlator Container Package)
         tar -cJf dxvk-${DXVK_VER}-gplasync-adreno840.wcp -C packaging .
 
     - name: Upload Artifacts
