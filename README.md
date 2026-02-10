@@ -1,6 +1,6 @@
-# Components
-Winlator Components
-Welcome to the my Components repository. This project serves as a centralized, organized archive for various emulation components, translation layers, and custom drivers, making them easily accessible for testing and deployment.
+#Components
+
+Welcome to my Components repository. This project serves as a centralized, organized archive for various emulation components, translation layers, and custom drivers, making them easily accessible for testing and deployment.
 
 📦 Included Components
 This repository hosts a growing collection of essential emulation tools, including but not limited to:
