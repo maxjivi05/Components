@@ -1,5 +1,3 @@
-#Components
-
 Welcome to my Components repository. This project serves as a centralized, organized archive for various emulation components, translation layers, and custom drivers, making them easily accessible for testing and deployment.
 
 📦 Included Components
