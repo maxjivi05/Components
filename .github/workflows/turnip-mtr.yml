@@ -1,0 +1,210 @@
+name: Turnip MTR Build
+
+on:
+  schedule:
+    # Runs at 00:00 UTC every day (24 hours)
+    - cron: '0 0 * * *'
+  # Allows you to run it manually from the Actions tab for testing
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [A840P, A8XX]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison flex python3-pip pkg-config patchelf ninja-build zip rsync
+          # --break-system-packages is required on Ubuntu 24.04+ runners
+          pip3 install meson mako jinja2 pyyaml ply --break-system-packages
+
+      - name: Install NDK
+        run: |
+          # Download to GITHUB_WORKSPACE to avoid path issues
+          wget -q https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip -q android-ndk-r27d-linux.zip
+          echo "ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r27d" >> $GITHUB_ENV
+
+      - name: Clone Mesa
+        run: |
+          git clone --depth=1 https://gitlab.freedesktop.org/mesa/mesa.git
+          cd mesa
+          echo "MESA_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Create Meson Cross File
+        run: |
+          mkdir -p ~/.local/share/meson/cross/
+          # We use envsubst or direct shell variable usage to ensure paths are correct
+          cat <<EOF > ~/.local/share/meson/cross/android-aarch64
+          [binaries]
+          ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
+          c = ['ccache', '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang']
+          cpp = ['ccache', '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang++']
+          c_ld = 'lld'
+          cpp_ld = 'lld'
+          strip = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'
+          pkg-config = ['env', 'PKG_CONFIG_LIBDIR=DISABLED', 'pkg-config']
+
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'armv8'
+          endian = 'little'
+          EOF
+
+      - name: Apply Common Patches
+        run: |
+          cd mesa
+          # 1. Scaling / Clamp Fix (tu_pipeline.cc)
+          sed -i 's/min.x = MAX2(min.x, 0);/min.x = CLAMP(min.x, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
+          sed -i 's/min.y = MAX2(min.y, 0);/min.y = CLAMP(min.y, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
+          sed -i 's/max.x = MAX2(max.x, 1);/max.x = CLAMP(max.x, 1, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
+          sed -i 's/max.y = MAX2(max.y, 1);/max.y = CLAMP(max.y, 1, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
+          sed -i 's/uint32_t min_x = scissor->offset.x;/uint32_t min_x = CLAMP(scissor->offset.x, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
+          sed -i 's/uint32_t min_y = scissor->offset.y;/uint32_t min_y = CLAMP(scissor->offset.y, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
+          sed -i 's/uint32_t max_x = min_x + scissor->extent.width - 1;/uint32_t max_x = CLAMP(min_x + scissor->extent.width - 1, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
+          sed -i 's/uint32_t max_y = min_y + scissor->extent.height - 1;/uint32_t max_y = CLAMP(min_y + scissor->extent.height - 1, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
+
+          # 2. DECK_EMU Flag (tu_util.h & tu_util.cc)
+          sed -i '/TU_DEBUG_FORCE_CONCURRENT_BINNING = BITFIELD64_BIT(36),/a \   TU_DEBUG_DECK_EMU                 = BITFIELD64_BIT(37),' src/freedreno/vulkan/tu_util.h
+          sed -i '/{ "dynamic", TU_DEBUG_DYNAMIC },/a \   { "deck_emu", TU_DEBUG_DECK_EMU },' src/freedreno/vulkan/tu_util.cc
+
+          # 3. AMD Spoofing (tu_device.cc)
+          sed -i '/props->deviceID = pdevice->dev_id.chip_id;/a \ \n   if (TU_DEBUG(DECK_EMU)) {\n      props->vendorID = 0x1002;\n      props->deviceID = 0x163F;\n   }' src/freedreno/vulkan/tu_device.cc
+          sed -i 's/strcpy(props->deviceName, pdevice->name);/strcpy(props->deviceName, pdevice->name);\n   if (TU_DEBUG(DECK_EMU)) {\n      strcpy(props->deviceName, "AMD Custom GPU 0405 (RADV VANGOGH)");\n   }/' src/freedreno/vulkan/tu_device.cc
+
+          # 4. vk_sync_timeline Fix - WRITTEN TO FILE FIRST TO AVOID QUOTE ERRORS
+          cat <<'EOF' > vk_sync_fix.py
+          import re
+          path = 'src/vulkan/runtime/vk_sync_timeline.c'
+          content = open(path).read()
+          new = r'''vk_sync_timeline_wait_locked(struct vk_device *device,
+                                       struct vk_sync_timeline_state *state,
+                                       uint64_t wait_value,
+                                       enum vk_sync_wait_flags wait_flags,
+                                       uint64_t abs_timeout_ns)
+          {
+              struct timespec abs_timeout_ts;
+              timespec_from_nsec(&abs_timeout_ts, abs_timeout_ns);
+
+              while (state->highest_past < wait_value) {
+                  struct vk_sync_timeline_point *point = NULL;
+                  list_for_each_entry(struct vk_sync_timeline_point, p,
+                                      &state->pending_points, link) {
+                      if (p->value >= wait_value) {
+                          vk_sync_timeline_ref_point_locked(p);
+                          point = p;
+                          break;
+                      }
+                  }
+                  if (!point) {
+                      int ret = u_cnd_monotonic_timedwait(&state->cond, &state->mutex, &abs_timeout_ts);
+                      if (ret == thrd_timedout) return VK_TIMEOUT;
+                      if (ret != thrd_success) return vk_errorf(device, VK_ERROR_UNKNOWN, "cnd_timedwait failed");
+                      continue;
+                  }
+                  mtx_unlock(&state->mutex);
+                  VkResult r = vk_sync_wait(device, &point->sync, 0, VK_SYNC_WAIT_COMPLETE, abs_timeout_ns);
+                  mtx_lock(&state->mutex);
+                  vk_sync_timeline_unref_point_locked(device, state, point);
+                  if (r != VK_SUCCESS) return r;
+                  vk_sync_timeline_complete_point_locked(device, state, point);
+              }
+              return VK_SUCCESS;
+          }'''
+          content = re.sub(r'vk_sync_timeline_wait_locked\(.*?\n\}', new, content, flags=re.DOTALL)
+          open(path, 'w').write(content)
+          EOF
+          python3 vk_sync_fix.py
+
+          # 5. A7xx Stability Fixes
+          sed -i '/a7xx_gen1 = GPUProps(/,/)/ s/cs_lock_unlock_quirk = True,/cs_lock_unlock_quirk = True,\n        has_early_preamble = False,\n        has_scalar_predicates = False,/' src/freedreno/common/freedreno_devices.py
+          sed -i '/a7xx_gen2 = GPUProps(/,/)/ s/has_image_processing = True,/has_image_processing = True,\n        has_early_preamble = False,\n        has_scalar_predicates = False,/' src/freedreno/common/freedreno_devices.py
+          sed -i '/a7xx_gen3 = GPUProps(/,/)/ s/has_image_processing = True,/has_image_processing = True,\n        has_early_preamble = False,\n        has_scalar_predicates = False,/' src/freedreno/common/freedreno_devices.py
+
+          # 6. Patch 01 & 02 logic
+          sed -i '/case 8:/,/tu_device_entrypoints_a8xx/ { /TU_DEBUG_FLUSHALL/d }' src/freedreno/vulkan/tu_device.cc
+          sed -i '/case KGSL_UBWC_4_0:/a \   case 5:\n   case 6:' src/freedreno/vulkan/tu_knl_kgsl.cc
+          sed -i 's/uint32_t gmsm = (\x27g\x27 << 24) | (\x27m\x27 << 16) | (\x27s\x27 << 8) | \x27m\x27;/\/* Bypass legacy gmsm *\/\n   if (hnd->handle->numInts >= 2) { bool ubwc = hnd->handle->data[hnd->handle->numFds + 1] \& 0x08000000; out->modifier = ubwc ? DRM_FORMAT_MOD_QCOM_COMPRESSED : DRM_FORMAT_MOD_LINEAR; }/' src/util/u_gralloc/u_gralloc_fallback.c
+          echo -e "vk_icdGetInstanceProcAddr\nvk_icdGetPhysicalDeviceProcAddr\nvk_icdNegotiateLoaderICDInterfaceVersion" >> src/vulkan/vulkan-icd-android-symbols.txt
+
+          # 7. Fix sync.h symlink
+          cd include/android_stub/sync && rm -f sync.h && cp ../android/sync.h sync.h
+
+      - name: Apply Variant Specific Patches
+        run: |
+          cd mesa
+          if [ "${{ matrix.variant }}" = "A8XX" ]; then
+            sed -i 's/bool has_image_processing;/bool has_image_processing;\n      bool disable_gmem;/' src/freedreno/common/freedreno_dev_info.h
+            sed -i 's/if (TU_DEBUG(SYSMEM)) {/bool no_gmem = cmd->device->physical_device->dev_info.props.disable_gmem;\n   if (no_gmem) { cmd->state.rp.gmem_disable_reason = "Unsupported GPU"; return true; }\n   if (TU_DEBUG(SYSMEM)) {/' src/freedreno/vulkan/tu_cmd_buffer.cc
+            sed -i 's/if (info->chip >= 8)/if (info->chip >= 8 \&\& info->num_slices > 1)/' src/freedreno/common/fd6_gmem_cache.h
+            sed -i '/if (info->chip >= 8 \&\& info->num_slices > 1)/!b;n;c\   {}' src/freedreno/common/fd6_gmem_cache.h
+            
+            # Using python script file for safety again
+            cat <<'EOF' > variant_patch.py
+          import re
+          path = 'src/freedreno/common/freedreno_devices.py'
+          content = open(path).read()
+          content = content.replace('reg_size_vec4 = 96,', 'reg_size_vec4 = 96,\n        has_fs_tex_prefetch = True,\n        has_salu_int_narrowing_quirk = False,')
+          # Simple gen2 clean
+          content = re.sub(r'has_fs_tex_prefetch = False,', '', content)
+          content = re.sub(r'has_salu_int_narrowing_quirk = True', '', content)
+          open(path, 'w').write(content)
+          EOF
+            python3 variant_patch.py
+            
+          elif [ "${{ matrix.variant }}" = "A840P" ]; then
+            sed -i 's/if (cmd_buffer->state.rp.drawcall_count > 5)/if (cmd_buffer->state.rp.drawcall_count > 10)/' src/freedreno/vulkan/tu_autotune.cc
+            sed -i 's/gmem_bandwidth = (gmem_bandwidth \* 11 + total_draw_call_bandwidth) \/ 10;/gmem_bandwidth = (gmem_bandwidth \* 10 + total_draw_call_bandwidth) \/ 10;/' src/freedreno/vulkan/tu_autotune.cc
+          fi
+
+      - name: Build Mesa
+        run: |
+          cd mesa
+          meson setup build-android-aarch64 \
+            -Dplatforms=android \
+            -Dplatform-sdk-version=35 \
+            -Dandroid-stub=true \
+            -Dandroid-libbacktrace=disabled \
+            -Degl=disabled \
+            -Dgallium-drivers= \
+            -Dvulkan-drivers=freedreno \
+            -Dfreedreno-kmds=kgsl \
+            -Dbuildtype=release \
+            -Dstrip=true \
+            -Db_lto=true \
+            -Db_lto_mode=default \
+            -Dvulkan-beta=true \
+            -Dallow-broken-lto=true \
+            --cross-file=android-aarch64
+          ninja -C build-android-aarch64 src/freedreno/vulkan/libvulkan_freedreno.so
+
+      - name: Generate Upstream Changelog
+        run: |
+          cd mesa
+          echo "===============================================================================" > ../CHANGELOG_UPSTREAM_24H.txt
+          echo "  MESA UPSTREAM COMMITS (LAST 24 HOURS)" >> ../CHANGELOG_UPSTREAM_24H.txt
+          echo "  BASE COMMIT: ${{ env.MESA_COMMIT }}" >> ../CHANGELOG_UPSTREAM_24H.txt
+          echo "===============================================================================" >> ../CHANGELOG_UPSTREAM_24H.txt
+          git log --since="24 hours ago" --format="* %h - %s" >> ../CHANGELOG_UPSTREAM_24H.txt
+
+      - name: Package Driver
+        run: |
+          SO=mesa/build-android-aarch64/src/freedreno/vulkan/libvulkan_freedreno.so
+          $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip $SO
+          patchelf --set-soname libvulkan_freedreno.so $SO
+          patchelf --remove-rpath $SO
+          mkdir package
+          cp $SO package/
+          cp CHANGELOG_UPSTREAM_24H.txt package/
+          cat <<EOF > package/meta.json
+          {
+            "schemaVersion": 1,
+            "name": "Turnip MTR v1.8.6 ${{ matrix.variant }}",
+            "description": "Mesa 26
