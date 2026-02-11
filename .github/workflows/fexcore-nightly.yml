@@ -1,12 +1,9 @@
 name: Build Winlator FEXCore WCP
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
   schedule:
-    - cron: '0 0 * * *' # Daily at midnight
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 env:
   LLVM_MINGW_URL: https://github.com/mstorsjo/llvm-mingw/releases/download/20251216/llvm-mingw-20251216-ucrt-ubuntu-22.04-x86_64.tar.xz
