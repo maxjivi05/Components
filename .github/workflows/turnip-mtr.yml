@@ -17,13 +17,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+     - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bison flex python3-pip pkg-config patchelf ninja-build zip rsync
+          # Added glslang-tools to the install list
+          sudo apt-get install -y bison flex python3-pip pkg-config patchelf ninja-build zip rsync glslang-tools
           # --break-system-packages is required on Ubuntu 24.04+ runners
           pip3 install meson mako jinja2 pyyaml ply --break-system-packages
-
+          
       - name: Install NDK
         run: |
           # Download to GITHUB_WORKSPACE to avoid path issues
