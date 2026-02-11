@@ -2,8 +2,9 @@ name: Turnip MTR Build
 
 on:
   schedule:
-    # Runs at 00:00 UTC every day
+    # Runs at 00:00 UTC every day (24 hours)
     - cron: '0 0 * * *'
+  # Allows you to run it manually from the Actions tab for testing
   workflow_dispatch:
 
 jobs:
@@ -70,7 +71,7 @@ jobs:
       - name: Apply Common Patches
         run: |
           cd mesa
-          # 1. Scaling / Clamp Fix
+          # 1. Scaling / Clamp Fix (tu_pipeline.cc)
           sed -i 's/min.x = MAX2(min.x, 0);/min.x = CLAMP(min.x, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
           sed -i 's/min.y = MAX2(min.y, 0);/min.y = CLAMP(min.y, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
           sed -i 's/max.x = MAX2(max.x, 1);/max.x = CLAMP(max.x, 1, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
@@ -80,15 +81,15 @@ jobs:
           sed -i 's/uint32_t max_x = min_x + scissor->extent.width - 1;/uint32_t max_x = CLAMP(min_x + scissor->extent.width - 1, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
           sed -i 's/uint32_t max_y = min_y + scissor->extent.height - 1;/uint32_t max_y = CLAMP(min_y + scissor->extent.height - 1, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
 
-          # 2. DECK_EMU Flag
+          # 2. DECK_EMU Flag (tu_util.h & tu_util.cc)
           sed -i '/TU_DEBUG_FORCE_CONCURRENT_BINNING = BITFIELD64_BIT(36),/a \   TU_DEBUG_DECK_EMU                 = BITFIELD64_BIT(37),' src/freedreno/vulkan/tu_util.h
           sed -i '/{ "dynamic", TU_DEBUG_DYNAMIC },/a \   { "deck_emu", TU_DEBUG_DECK_EMU },' src/freedreno/vulkan/tu_util.cc
 
-          # 3. AMD Spoofing
+          # 3. AMD Spoofing (tu_device.cc)
           sed -i '/props->deviceID = pdevice->dev_id.chip_id;/a \ \n   if (TU_DEBUG(DECK_EMU)) {\n      props->vendorID = 0x1002;\n      props->deviceID = 0x163F;\n   }' src/freedreno/vulkan/tu_device.cc
           sed -i 's/strcpy(props->deviceName, pdevice->name);/strcpy(props->deviceName, pdevice->name);\n   if (TU_DEBUG(DECK_EMU)) {\n      strcpy(props->deviceName, "AMD Custom GPU 0405 (RADV VANGOGH)");\n   }/' src/freedreno/vulkan/tu_device.cc
 
-          # 4. vk_sync_timeline Fix - SMART PARSER (Fixes compilation error)
+          # 4. vk_sync_timeline Fix - SMART PARSER (Prevents C compilation errors)
           cat <<'EOF' > vk_sync_fix.py
           import sys
 
@@ -195,15 +196,26 @@ jobs:
             sed -i 's/if (info->chip >= 8)/if (info->chip >= 8 \&\& info->num_slices > 1)/' src/freedreno/common/fd6_gmem_cache.h
             sed -i '/if (info->chip >= 8 \&\& info->num_slices > 1)/!b;n;c\   {}' src/freedreno/common/fd6_gmem_cache.h
             
+            # FIXED PATCH: Uses regex to avoid "keyword argument repeated" SyntaxError
             cat <<'EOF' > variant_patch.py
           import re
           path = 'src/freedreno/common/freedreno_devices.py'
-          content = open(path).read()
-          content = content.replace('reg_size_vec4 = 96,', 'reg_size_vec4 = 96,\n        has_fs_tex_prefetch = True,\n        has_salu_int_narrowing_quirk = False,')
-          # Simple gen2 clean
+          with open(path, 'r') as f:
+              content = f.read()
+          
+          # Replace reg_size_vec4=96 with our block, but ensure we don't duplicate keys if they exist
+          # This regex matches 'reg_size_vec4 = 96,' and optionally consumes 'has_fs_tex_prefetch = ...' if it immediately follows
+          regex = r'(reg_size_vec4\s*=\s*96,)(?:\s*has_fs_tex_prefetch\s*=\s*(?:True|False),)?(?:\s*has_salu_int_narrowing_quirk\s*=\s*(?:True|False),)?'
+          replacement = r'\1\n        has_fs_tex_prefetch = True,\n        has_salu_int_narrowing_quirk = False,'
+          
+          content = re.sub(regex, replacement, content)
+          
+          # Clean up any other potential conflicts (simple clean)
           content = re.sub(r'has_fs_tex_prefetch = False,', '', content)
-          content = re.sub(r'has_salu_int_narrowing_quirk = True', '', content)
-          open(path, 'w').write(content)
+          # Note: We don't blindly remove has_salu...=True because we just set it to False above.
+          
+          with open(path, 'w') as f:
+              f.write(content)
           EOF
             python3 variant_patch.py
             
