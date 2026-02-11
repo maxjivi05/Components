@@ -17,14 +17,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-     - name: Install dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          # Added glslang-tools to the install list
+          # Added glslang-tools to fix the missing validator error
           sudo apt-get install -y bison flex python3-pip pkg-config patchelf ninja-build zip rsync glslang-tools
           # --break-system-packages is required on Ubuntu 24.04+ runners
           pip3 install meson mako jinja2 pyyaml ply --break-system-packages
-          
+
       - name: Install NDK
         run: |
           # Download to GITHUB_WORKSPACE to avoid path issues
@@ -208,4 +208,19 @@ jobs:
           {
             "schemaVersion": 1,
             "name": "Turnip MTR v1.8.6 ${{ matrix.variant }}",
-            "description": "Mesa 26
+            "description": "Mesa 26.1.0 Devel v1.8.6 ${{ matrix.variant }}",
+            "author": "MaxsTechReview",
+            "packageVersion": "13",
+            "vendor": "mesa",
+            "driverVersion": "Mesa 26.1.0 Devel v1.8.6",
+            "minApi": 29,
+            "libraryName": "libvulkan_freedreno.so"
+          }
+          EOF
+          cd package && zip -j ../Turnip_MTR_v1.8.6_${{ matrix.variant }}.zip meta.json libvulkan_freedreno.so CHANGELOG_UPSTREAM_24H.txt
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Turnip_MTR_v1.8.6_${{ matrix.variant }}
+          path: Turnip_MTR_v1.8.6_${{ matrix.variant }}.zip
