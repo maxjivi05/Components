@@ -2,9 +2,8 @@ name: Turnip MTR Build
 
 on:
   schedule:
-    # Runs at 00:00 UTC every day (24 hours)
+    # Runs at 00:00 UTC every day
     - cron: '0 0 * * *'
-  # Allows you to run it manually from the Actions tab for testing
   workflow_dispatch:
 
 jobs:
@@ -20,17 +19,26 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          # glslang-tools is required for the build
           sudo apt-get install -y bison flex python3-pip pkg-config patchelf ninja-build zip rsync glslang-tools
-          # --break-system-packages is required on Ubuntu 24.04+ runners
           pip3 install meson mako jinja2 pyyaml ply --break-system-packages
 
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: android-ndk-r27d
+          key: ndk-r27d-linux
+
       - name: Install NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
-          # Download to GITHUB_WORKSPACE to avoid path issues
-          # Added --show-progress so you can see if the download hangs
-          wget -q --show-progress https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          # Only runs if NDK is not found in cache
+          # -nv flag prevents log spam (thousands of lines) while still showing errors
+          wget -nv https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
           unzip -q android-ndk-r27d-linux.zip
+
+      - name: Setup NDK Path
+        run: |
           echo "ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r27d" >> $GITHUB_ENV
 
       - name: Clone Mesa
@@ -62,7 +70,7 @@ jobs:
       - name: Apply Common Patches
         run: |
           cd mesa
-          # 1. Scaling / Clamp Fix (tu_pipeline.cc)
+          # 1. Scaling / Clamp Fix
           sed -i 's/min.x = MAX2(min.x, 0);/min.x = CLAMP(min.x, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
           sed -i 's/min.y = MAX2(min.y, 0);/min.y = CLAMP(min.y, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
           sed -i 's/max.x = MAX2(max.x, 1);/max.x = CLAMP(max.x, 1, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
@@ -72,15 +80,15 @@ jobs:
           sed -i 's/uint32_t max_x = min_x + scissor->extent.width - 1;/uint32_t max_x = CLAMP(min_x + scissor->extent.width - 1, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
           sed -i 's/uint32_t max_y = min_y + scissor->extent.height - 1;/uint32_t max_y = CLAMP(min_y + scissor->extent.height - 1, 0, 16383);/' src/freedreno/vulkan/tu_pipeline.cc
 
-          # 2. DECK_EMU Flag (tu_util.h & tu_util.cc)
+          # 2. DECK_EMU Flag
           sed -i '/TU_DEBUG_FORCE_CONCURRENT_BINNING = BITFIELD64_BIT(36),/a \   TU_DEBUG_DECK_EMU                 = BITFIELD64_BIT(37),' src/freedreno/vulkan/tu_util.h
           sed -i '/{ "dynamic", TU_DEBUG_DYNAMIC },/a \   { "deck_emu", TU_DEBUG_DECK_EMU },' src/freedreno/vulkan/tu_util.cc
 
-          # 3. AMD Spoofing (tu_device.cc)
+          # 3. AMD Spoofing
           sed -i '/props->deviceID = pdevice->dev_id.chip_id;/a \ \n   if (TU_DEBUG(DECK_EMU)) {\n      props->vendorID = 0x1002;\n      props->deviceID = 0x163F;\n   }' src/freedreno/vulkan/tu_device.cc
           sed -i 's/strcpy(props->deviceName, pdevice->name);/strcpy(props->deviceName, pdevice->name);\n   if (TU_DEBUG(DECK_EMU)) {\n      strcpy(props->deviceName, "AMD Custom GPU 0405 (RADV VANGOGH)");\n   }/' src/freedreno/vulkan/tu_device.cc
 
-          # 4. vk_sync_timeline Fix - SMART PARSER VERSION
+          # 4. vk_sync_timeline Fix - SMART PARSER (Fixes compilation error)
           cat <<'EOF' > vk_sync_fix.py
           import sys
 
@@ -91,8 +99,6 @@ jobs:
               print(f"File not found: {path}"); sys.exit(1)
 
           start_marker = 'vk_sync_timeline_wait_locked'
-          
-          # The new body we want to inject
           new_code = r'''vk_sync_timeline_wait_locked(struct vk_device *device,
                                                  struct vk_sync_timeline_state *state,
                                                  uint64_t wait_value,
@@ -133,11 +139,9 @@ jobs:
               idx = content.find(start_marker, idx)
               if idx == -1: break
               
-              # 1. Check for opening paren
               open_paren = content.find('(', idx)
               if open_paren == -1: idx += 1; continue
               
-              # 2. Find matching closing paren
               balance = 0
               close_paren = -1
               for i in range(open_paren, len(content)):
@@ -148,10 +152,8 @@ jobs:
               
               if close_paren == -1: idx += 1; continue
                   
-              # 3. Check if followed by '{' (definition) instead of ';' (call)
               after_args = content[close_paren+1:]
               if after_args.lstrip().startswith('{'):
-                  # Found the definition! Now find the end of the function body.
                   body_start = close_paren + 1 + after_args.find('{')
                   balance = 0
                   body_end = -1
@@ -162,7 +164,6 @@ jobs:
                           if balance == 0: body_end = i + 1; break
                   
                   if body_end != -1:
-                      # Replace the function
                       content = content[:idx] + new_code + content[body_end:]
                       with open(path, 'w') as f: f.write(content)
                       print("Successfully patched vk_sync_timeline.c"); sys.exit(0)
