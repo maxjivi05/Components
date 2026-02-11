@@ -28,7 +28,8 @@ jobs:
       - name: Install NDK
         run: |
           # Download to GITHUB_WORKSPACE to avoid path issues
-          wget -q https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          # Added --show-progress so you can see if the download hangs
+          wget -q --show-progress https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
           unzip -q android-ndk-r27d-linux.zip
           echo "ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r27d" >> $GITHUB_ENV
 
@@ -262,6 +263,7 @@ jobs:
             "libraryName": "libvulkan_freedreno.so"
           }
           EOF
+          # Filename now includes commit hash (e.g., Turnip_MTR_Nightly_a1b2c3d_A8XX.zip)
           cd package && zip -j ../Turnip_MTR_Nightly_${{ env.MESA_COMMIT }}_${{ matrix.variant }}.zip meta.json libvulkan_freedreno.so CHANGELOG_UPSTREAM_24H.txt
 
       - name: Upload Artifact
