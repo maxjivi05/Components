@@ -41,7 +41,6 @@ jobs:
       - name: Create Meson Cross File
         run: |
           mkdir -p ~/.local/share/meson/cross/
-          # We use envsubst or direct shell variable usage to ensure paths are correct
           cat <<EOF > ~/.local/share/meson/cross/android-aarch64
           [binaries]
           ar = '$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
@@ -80,16 +79,24 @@ jobs:
           sed -i '/props->deviceID = pdevice->dev_id.chip_id;/a \ \n   if (TU_DEBUG(DECK_EMU)) {\n      props->vendorID = 0x1002;\n      props->deviceID = 0x163F;\n   }' src/freedreno/vulkan/tu_device.cc
           sed -i 's/strcpy(props->deviceName, pdevice->name);/strcpy(props->deviceName, pdevice->name);\n   if (TU_DEBUG(DECK_EMU)) {\n      strcpy(props->deviceName, "AMD Custom GPU 0405 (RADV VANGOGH)");\n   }/' src/freedreno/vulkan/tu_device.cc
 
-          # 4. vk_sync_timeline Fix
+          # 4. vk_sync_timeline Fix - SMART PARSER VERSION
           cat <<'EOF' > vk_sync_fix.py
-          import re
+          import sys
+
           path = 'src/vulkan/runtime/vk_sync_timeline.c'
-          content = open(path).read()
-          new = r'''vk_sync_timeline_wait_locked(struct vk_device *device,
-                                       struct vk_sync_timeline_state *state,
-                                       uint64_t wait_value,
-                                       enum vk_sync_wait_flags wait_flags,
-                                       uint64_t abs_timeout_ns)
+          try:
+              with open(path, 'r') as f: content = f.read()
+          except FileNotFoundError:
+              print(f"File not found: {path}"); sys.exit(1)
+
+          start_marker = 'vk_sync_timeline_wait_locked'
+          
+          # The new body we want to inject
+          new_code = r'''vk_sync_timeline_wait_locked(struct vk_device *device,
+                                                 struct vk_sync_timeline_state *state,
+                                                 uint64_t wait_value,
+                                                 enum vk_sync_wait_flags wait_flags,
+                                                 uint64_t abs_timeout_ns)
           {
               struct timespec abs_timeout_ts;
               timespec_from_nsec(&abs_timeout_ts, abs_timeout_ns);
@@ -119,8 +126,47 @@ jobs:
               }
               return VK_SUCCESS;
           }'''
-          content = re.sub(r'vk_sync_timeline_wait_locked\(.*?\n\}', new, content, flags=re.DOTALL)
-          open(path, 'w').write(content)
+
+          idx = 0
+          while True:
+              idx = content.find(start_marker, idx)
+              if idx == -1: break
+              
+              # 1. Check for opening paren
+              open_paren = content.find('(', idx)
+              if open_paren == -1: idx += 1; continue
+              
+              # 2. Find matching closing paren
+              balance = 0
+              close_paren = -1
+              for i in range(open_paren, len(content)):
+                  if content[i] == '(': balance += 1
+                  elif content[i] == ')': 
+                      balance -= 1
+                      if balance == 0: close_paren = i; break
+              
+              if close_paren == -1: idx += 1; continue
+                  
+              # 3. Check if followed by '{' (definition) instead of ';' (call)
+              after_args = content[close_paren+1:]
+              if after_args.lstrip().startswith('{'):
+                  # Found the definition! Now find the end of the function body.
+                  body_start = close_paren + 1 + after_args.find('{')
+                  balance = 0
+                  body_end = -1
+                  for i in range(body_start, len(content)):
+                      if content[i] == '{': balance += 1
+                      elif content[i] == '}':
+                          balance -= 1
+                          if balance == 0: body_end = i + 1; break
+                  
+                  if body_end != -1:
+                      # Replace the function
+                      content = content[:idx] + new_code + content[body_end:]
+                      with open(path, 'w') as f: f.write(content)
+                      print("Successfully patched vk_sync_timeline.c"); sys.exit(0)
+              idx += 1
+          print("Failed to find function definition"); sys.exit(1)
           EOF
           python3 vk_sync_fix.py
 
@@ -132,7 +178,6 @@ jobs:
           # 6. Patch 01 & 02 logic
           sed -i '/case 8:/,/tu_device_entrypoints_a8xx/ { /TU_DEBUG_FLUSHALL/d }' src/freedreno/vulkan/tu_device.cc
           sed -i '/case KGSL_UBWC_4_0:/a \   case 5:\n   case 6:' src/freedreno/vulkan/tu_knl_kgsl.cc
-          # The '&' below ensures we keep the 'uint32_t gmsm = ...;' definition, preventing the "undeclared identifier" error
           sed -i 's/uint32_t gmsm = (\x27g\x27 << 24) | (\x27m\x27 << 16) | (\x27s\x27 << 8) | \x27m\x27;/& \/* Bypass legacy gmsm *\/\n   if (hnd->handle->numInts >= 2) { bool ubwc = hnd->handle->data[hnd->handle->numFds + 1] \& 0x08000000; out->modifier = ubwc ? DRM_FORMAT_MOD_QCOM_COMPRESSED : DRM_FORMAT_MOD_LINEAR; }/' src/util/u_gralloc/u_gralloc_fallback.c
           echo -e "vk_icdGetInstanceProcAddr\nvk_icdGetPhysicalDeviceProcAddr\nvk_icdNegotiateLoaderICDInterfaceVersion" >> src/vulkan/vulkan-icd-android-symbols.txt
 
@@ -148,7 +193,6 @@ jobs:
             sed -i 's/if (info->chip >= 8)/if (info->chip >= 8 \&\& info->num_slices > 1)/' src/freedreno/common/fd6_gmem_cache.h
             sed -i '/if (info->chip >= 8 \&\& info->num_slices > 1)/!b;n;c\   {}' src/freedreno/common/fd6_gmem_cache.h
             
-            # Using python script file for safety again
             cat <<'EOF' > variant_patch.py
           import re
           path = 'src/freedreno/common/freedreno_devices.py'
