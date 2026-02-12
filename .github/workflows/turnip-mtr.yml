@@ -202,18 +202,27 @@ jobs:
           path = 'src/freedreno/common/freedreno_devices.py'
           with open(path, 'r') as f:
               content = f.read()
-          
-          # Replace reg_size_vec4=96 with our block, but ensure we don't duplicate keys if they exist
-          # This regex matches 'reg_size_vec4 = 96,' and optionally consumes 'has_fs_tex_prefetch = ...' if it immediately follows
-          regex = r'(reg_size_vec4\s*=\s*96,)(?:\s*has_fs_tex_prefetch\s*=\s*(?:True|False),)?(?:\s*has_salu_int_narrowing_quirk\s*=\s*(?:True|False),)?'
-          replacement = r'\1\n        has_fs_tex_prefetch = True,\n        has_salu_int_narrowing_quirk = False,'
-          
-          content = re.sub(regex, replacement, content)
-          
-          # Clean up any other potential conflicts (simple clean)
-          content = re.sub(r'has_fs_tex_prefetch = False,', '', content)
-          # Note: We don't blindly remove has_salu...=True because we just set it to False above.
-          
+
+          # Pattern to find a8xx_base block
+          # matches "a8xx_base = GPUProps(" until the closing ")"
+          pattern = r'(a8xx_base = GPUProps\()(.*?)(\n    \))'
+
+          def replacement(match):
+              header = match.group(1)
+              body = match.group(2)
+              footer = match.group(3)
+              
+              # Remove existing keys to avoid duplication
+              body = re.sub(r'\s*has_fs_tex_prefetch\s*=\s*(?:True|False),', '', body)
+              body = re.sub(r'\s*has_salu_int_narrowing_quirk\s*=\s*(?:True|False),', '', body)
+              
+              # Append new keys
+              new_props = "\n        has_fs_tex_prefetch = True,\n        has_salu_int_narrowing_quirk = False,"
+              
+              return header + body + new_props + footer
+
+          content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+
           with open(path, 'w') as f:
               f.write(content)
           EOF
