@@ -44,7 +44,7 @@ jobs:
 
       - name: Clone Mesa
         run: |
-          git clone --depth=1 https://gitlab.freedesktop.org/mesa/mesa.git
+          git clone --depth=200 https://gitlab.freedesktop.org/mesa/mesa.git
           cd mesa
           echo "MESA_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
@@ -286,10 +286,12 @@ jobs:
           }
           EOF
           # Filename now includes commit hash (e.g., Turnip_MTR_Nightly_a1b2c3d_A8XX.zip)
-          cd package && zip -j ../Turnip_MTR_Nightly_${{ env.MESA_COMMIT }}_${{ matrix.variant }}.zip meta.json libvulkan_freedreno.so CHANGELOG_UPSTREAM_24H.txt
+          cd package && zip -j ../Turnip_MTR_Nightly_${{ env.MESA_COMMIT }}_${{ matrix.variant }}.zip meta.json libvulkan_freedreno.so
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Turnip_MTR_Nightly_${{ env.MESA_COMMIT }}_${{ matrix.variant }}
-          path: Turnip_MTR_Nightly_${{ env.MESA_COMMIT }}_${{ matrix.variant }}.zip
+          path: |
+            Turnip_MTR_Nightly_${{ env.MESA_COMMIT }}_${{ matrix.variant }}.zip
+            CHANGELOG_UPSTREAM_24H.txt
