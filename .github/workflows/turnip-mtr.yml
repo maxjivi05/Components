@@ -179,9 +179,41 @@ jobs:
           sed -i '/a7xx_gen3 = GPUProps(/,/)/ s/has_image_processing = True,/has_image_processing = True,\n        has_early_preamble = False,\n        has_scalar_predicates = False,/' src/freedreno/common/freedreno_devices.py
 
           # 6. Patch 01 & 02 logic
+          # Remove FLUSHALL from case 8 if present
           sed -i '/case 8:/,/tu_device_entrypoints_a8xx/ { /TU_DEBUG_FLUSHALL/d }' src/freedreno/vulkan/tu_device.cc
+
+          # Add UBWC version 5/6 support for newer Qualcomm kernels
           sed -i '/case KGSL_UBWC_4_0:/a \   case 5:\n   case 6:' src/freedreno/vulkan/tu_knl_kgsl.cc
-          sed -i 's/uint32_t gmsm = (\x27g\x27 << 24) | (\x27m\x27 << 16) | (\x27s\x27 << 8) | \x27m\x27;/& \/* Bypass legacy gmsm *\/\n   if (hnd->handle->numInts >= 2) { bool ubwc = hnd->handle->data[hnd->handle->numFds + 1] \& 0x08000000; out->modifier = ubwc ? DRM_FORMAT_MOD_QCOM_COMPRESSED : DRM_FORMAT_MOD_LINEAR; }/' src/util/u_gralloc/u_gralloc_fallback.c
+
+          # Fix gralloc UBWC detection - replace legacy gmsm check with direct UBWC flag read
+          cat <<'GRALLOC_EOF' > gralloc_fix.py
+          import re
+          path = 'src/util/u_gralloc/u_gralloc_fallback.c'
+          with open(path, 'r') as f:
+              content = f.read()
+
+          # Pattern to find the old gmsm-based UBWC check block
+          old_pattern = r'#ifdef HAS_FREEDRENO\s+uint32_t gmsm = .*?if \(hnd->handle->numInts >= 2 && hnd->handle->data\[hnd->handle->numFds\] == gmsm\) \{[^}]+\}'
+
+          new_code = '''#ifdef HAS_FREEDRENO
+             /* This UBWC flag was introduced in a5xx. Newer Qualcomm gralloc
+              * implementations (A8XX / Snapdragon 8 Elite) no longer use the legacy
+              * 'gmsm' magic header, so always read the UBWC flag directly.
+              */
+             if (hnd->handle->numInts >= 2) {
+                bool ubwc = hnd->handle->data[hnd->handle->numFds + 1] & 0x08000000;
+                out->modifier = ubwc ? DRM_FORMAT_MOD_QCOM_COMPRESSED : DRM_FORMAT_MOD_LINEAR;
+             }'''
+
+          content = re.sub(old_pattern, new_code, content, flags=re.DOTALL)
+
+          with open(path, 'w') as f:
+              f.write(content)
+          print("Gralloc UBWC fix applied")
+          GRALLOC_EOF
+          python3 gralloc_fix.py
+
+          # Add ICD exports for emulator compatibility
           echo -e "vk_icdGetInstanceProcAddr\nvk_icdGetPhysicalDeviceProcAddr\nvk_icdNegotiateLoaderICDInterfaceVersion" >> src/vulkan/vulkan-icd-android-symbols.txt
 
           # 7. Fix sync.h symlink
@@ -191,12 +223,51 @@ jobs:
         run: |
           cd mesa
           if [ "${{ matrix.variant }}" = "A8XX" ]; then
-            sed -i 's/bool has_image_processing;/bool has_image_processing;\n      bool disable_gmem;/' src/freedreno/common/freedreno_dev_info.h
-            sed -i 's/if (TU_DEBUG(SYSMEM)) {/bool no_gmem = cmd->device->physical_device->dev_info.props.disable_gmem;\n   if (no_gmem) { cmd->state.rp.gmem_disable_reason = "Unsupported GPU"; return true; }\n   if (TU_DEBUG(SYSMEM)) {/' src/freedreno/vulkan/tu_cmd_buffer.cc
+            # A8XX Gen1 devices (A810, A825, A829, A830) use IMR (Immediate Mode Rendering)
+            # instead of TBR (Tile Based Rendering). GMEM doesn't work on these chips.
+            # Gen2 devices (A840, X2-85) use TBR and work fine with GMEM.
+            # Detection: Gen2 chip_ids have 0xffff prefix, Gen1 don't.
+
+            # Add sysmem forcing for A8XX Gen1 devices in tu_device.cc
+            cat <<'A8XX_SYSMEM_EOF' > a8xx_sysmem_fix.py
+          import re
+          path = 'src/freedreno/vulkan/tu_device.cc'
+          with open(path, 'r') as f:
+              content = f.read()
+
+          # Find case 8: and add Gen1/Gen2 detection before the dispatch table setup
+          old_pattern = r'(case 8:\s*\n)(\s*)(vk_device_dispatch_table_from_entrypoints\(\s*&dispatch_table, &tu_device_entrypoints_a8xx)'
+
+          new_code = r'''\1\2/* A8XX Gen1 devices (A830/FD830, A810, A825, A829) need sysmem rendering
+      * forced because they use IMR (Immediate Mode Rendering) instead of
+      * traditional TBR (Tile Based Rendering). GMEM doesn't work properly.
+      * A840 and X2-85 (Gen2) work fine with GMEM.
+      *
+      * Gen1 chip_ids: 0x4405xxxx (A830), 0x4401xxxx (A810), 0x4403xxxx (A825/A829)
+      * Gen2 chip_ids: 0xffff4405xxxx (A840), 0xffff4407xxxx (X2-85)
+      */
+      {
+         uint64_t chip = physical_device->dev_id.chip_id;
+         bool is_gen2 = (chip >> 32) == 0xffff;
+         if (!is_gen2) {
+            tu_env.debug |= TU_DEBUG_SYSMEM;
+         }
+      }
+      \3'''
+
+          content = re.sub(old_pattern, new_code, content)
+
+          with open(path, 'w') as f:
+              f.write(content)
+          print("A8XX Gen1 sysmem fix applied")
+          A8XX_SYSMEM_EOF
+            python3 a8xx_sysmem_fix.py
+
+            # Fix fd6_gmem_cache.h for A8XX compatibility
             sed -i 's/if (info->chip >= 8)/if (info->chip >= 8 \&\& info->num_slices > 1)/' src/freedreno/common/fd6_gmem_cache.h
             sed -i '/if (info->chip >= 8 \&\& info->num_slices > 1)/!b;n;c\   {}' src/freedreno/common/fd6_gmem_cache.h
-            
-            # FIXED PATCH: Uses regex to avoid "keyword argument repeated" SyntaxError
+
+            # Patch a8xx_base in freedreno_devices.py
             cat <<'EOF' > variant_patch.py
           import re
           path = 'src/freedreno/common/freedreno_devices.py'
@@ -204,30 +275,30 @@ jobs:
               content = f.read()
 
           # Pattern to find a8xx_base block
-          # matches "a8xx_base = GPUProps(" until the closing ")"
           pattern = r'(a8xx_base = GPUProps\()(.*?)(\n    \))'
 
           def replacement(match):
               header = match.group(1)
               body = match.group(2)
               footer = match.group(3)
-              
+
               # Remove existing keys to avoid duplication
               body = re.sub(r'\s*has_fs_tex_prefetch\s*=\s*(?:True|False),', '', body)
               body = re.sub(r'\s*has_salu_int_narrowing_quirk\s*=\s*(?:True|False),', '', body)
-              
+
               # Append new keys
               new_props = "\n        has_fs_tex_prefetch = True,\n        has_salu_int_narrowing_quirk = False,"
-              
+
               return header + body + new_props + footer
 
           content = re.sub(pattern, replacement, content, flags=re.DOTALL)
 
           with open(path, 'w') as f:
               f.write(content)
+          print("A8XX base properties patched")
           EOF
             python3 variant_patch.py
-            
+
           elif [ "${{ matrix.variant }}" = "A840P" ]; then
             sed -i 's/if (cmd_buffer->state.rp.drawcall_count > 5)/if (cmd_buffer->state.rp.drawcall_count > 10)/' src/freedreno/vulkan/tu_autotune.cc
             sed -i 's/gmem_bandwidth = (gmem_bandwidth \* 11 + total_draw_call_bandwidth) \/ 10;/gmem_bandwidth = (gmem_bandwidth \* 10 + total_draw_call_bandwidth) \/ 10;/' src/freedreno/vulkan/tu_autotune.cc
@@ -236,6 +307,7 @@ jobs:
       - name: Build Mesa
         run: |
           cd mesa
+          # Note: LTO is prohibited in Mesa 26.1.0+ so we don't use -Db_lto=true
           meson setup build-android-aarch64 \
             -Dplatforms=android \
             -Dplatform-sdk-version=35 \
@@ -247,10 +319,7 @@ jobs:
             -Dfreedreno-kmds=kgsl \
             -Dbuildtype=release \
             -Dstrip=true \
-            -Db_lto=true \
-            -Db_lto_mode=default \
             -Dvulkan-beta=true \
-            -Dallow-broken-lto=true \
             --cross-file=android-aarch64
           ninja -C build-android-aarch64 src/freedreno/vulkan/libvulkan_freedreno.so
 
@@ -295,3 +364,4 @@ jobs:
           path: |
             Turnip_MTR_Nightly_${{ env.MESA_COMMIT }}_${{ matrix.variant }}.zip
             CHANGELOG_UPSTREAM_24H.txt
+            
